@@ -40,8 +40,8 @@ val_transforms = A.Compose([
     ToTensorV2(),
 ])
 
-# --- 2. THE CORE PREDICTION FUNCTION (REVISED) ---
-# This function now returns TWO outputs: the image and a dictionary for the label component.
+# --- 2. THE CORE PREDICTION FUNCTION (UPGRADED) ---
+# Now returns the image and a dictionary with confidence scores for the label component.
 def predict_defects(input_image):
     original_h, original_w, _ = input_image.shape
 
@@ -51,49 +51,53 @@ def predict_defects(input_image):
     with torch.no_grad():
         pred_logits = model(image_tensor)
 
-    pred_probs = torch.sigmoid(pred_logits)
-    pred_masks_small = (pred_probs > 0.5).cpu().numpy().squeeze()
-
+    pred_probs = torch.sigmoid(pred_logits).cpu().numpy().squeeze()
+    
     output_image = input_image.copy()
-    # This will be the dictionary for the gr.Label component
     defect_summary = {}
 
-    for i, mask_small in enumerate(pred_masks_small):
-        if mask_small.sum() > 0:
+    for i, class_prob_mask in enumerate(pred_probs):
+        # Check if any pixel in the mask has a high probability
+        if np.max(class_prob_mask) > 0.5:
             class_id = i + 1
-            # Add the detected defect to our summary dictionary
-            defect_summary[CLASS_NAMES[class_id]] = 1.0
             
-            resized_mask = cv2.resize(mask_small.astype(np.uint8), (original_w, original_h), interpolation=cv2.INTER_NEAREST)
+            # Get the highest probability value in the mask as the confidence score
+            confidence = np.max(class_prob_mask)
+            defect_summary[CLASS_NAMES[class_id]] = confidence
+            
+            # Create the binary mask for drawing
+            binary_mask = (class_prob_mask > 0.5).astype(np.uint8)
+            resized_mask = cv2.resize(binary_mask, (original_w, original_h), interpolation=cv2.INTER_NEAREST)
             
             color = COLORS[i]
             colored_mask = np.zeros_like(output_image)
             colored_mask[resized_mask > 0] = color
             output_image = cv2.addWeighted(output_image, 1, colored_mask, 0.5, 0)
 
-    # If no defects were found, the dictionary will be empty, which is what gr.Label expects.
     return output_image, defect_summary
 
-# --- 3. GRADIO INTERFACE (PROFESSIONAL LAYOUT) ---
-# We use gr.Blocks() for full control over the layout.
-with gr.Blocks(theme='soft', css=".footer {display: none !important}") as demo:
+# --- 3. GRADIO INTERFACE ---
+with gr.Blocks(theme='gradio/base', css=".footer {display: none !important}") as demo:
     gr.Markdown(
         """
         # Automated Steel Defect Detection
-        ### Developed by a Senior Materials & Project Engineer
+        ### Developed by [Ahmed Aburakhia](https://github.com/aaburakhia) <!-- CHANGED: Personalized byline -->
+        <p style='font-size: 16px;'> <!-- CHANGED: Increased font size -->
         This application uses a U-Net deep learning model to identify and segment manufacturing defects on steel sheets. 
         Upload an image or use one of the examples below to see the model in action.
+        </p>
         """
     )
     
-    with gr.Row():
-        with gr.Column():
+    with gr.Row(variant='panel'):
+        with gr.Column(scale=1):
             image_input = gr.Image(type="numpy", label="Upload Steel Sheet Image")
-            submit_button = gr.Button("Submit", variant="primary")
-        with gr.Column():
-            image_output = gr.Image(label="Defect Analysis")
-            label_output = gr.Label(label="Detected Defect Types")
+            submit_button = gr.Button("Submit for Analysis", variant="primary")
+        with gr.Column(scale=1):
+            image_output = gr.Image(label="Defect Analysis Result")
+            label_output = gr.Label(label="Defect Analysis Report") # NEW: More descriptive title
 
+    gr.Markdown("### Click an Example to Start")
     gr.Examples(
         examples=[
             os.path.join("examples", "0b970984e.jpg"),
@@ -103,8 +107,26 @@ with gr.Blocks(theme='soft', css=".footer {display: none !important}") as demo:
         inputs=image_input,
         outputs=[image_output, label_output],
         fn=predict_defects,
-        cache_examples=True # Speeds up demo for users
+        cache_examples=True,
+        examples_per_page=3 # CHANGED: Makes examples larger
     )
+
+    with gr.Accordion("View Project Details", open=False): # NEW: Collapsible section for details
+        gr.Markdown(
+            """
+            ### Project Narrative
+            As a Senior Materials & Project Engineer with over 12 years in the Saudi Oil & Gas sector, I undertook this project to pivot my career towards R&D and Materials Informatics. The goal was to build an elite-level portfolio piece that directly combines my deep engineering background with advanced AI/ML skills.
+
+            ### Business Value
+            Automated defect detection is critical in steel manufacturing for quality control, cost reduction, and safety assurance. This tool can significantly reduce manual inspection time, improve consistency, and provide valuable data for process optimization.
+
+            ### Technical Stack
+            - **Model:** U-Net with an EfficientNet-B4 backbone, pre-trained on ImageNet.
+            - **Frameworks:** PyTorch, Segmentation Models Pytorch.
+            - **Tools:** Kaggle for training, Gradio for the UI, Hugging Face Spaces for deployment.
+            - **Key Techniques:** Transfer Learning, Custom Loss Functions (Dice + Focal), Data Augmentation (Albumentations).
+            """
+        )
 
     submit_button.click(
         fn=predict_defects,
