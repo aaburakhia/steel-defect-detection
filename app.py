@@ -39,30 +39,52 @@ val_transforms = A.Compose([
     ToTensorV2(),
 ])
 
-# --- 2. THE CORE PREDICTION FUNCTION ---
+# --- 2. THE CORE PREDICTION FUNCTION (CORRECTED) ---
 def predict_defects(input_image):
+    # The user-uploaded image has original dimensions (e.g., 1080px high)
+    original_h, original_w, _ = input_image.shape
+
+    # Preprocess the image for the model (resizes it to 256x800)
     transformed = val_transforms(image=input_image)
     image_tensor = transformed['image'].unsqueeze(0).to(DEVICE)
+
     with torch.no_grad():
         pred_logits = model(image_tensor)
+
+    # The output masks are fixed at 256x800
     pred_probs = torch.sigmoid(pred_logits)
-    pred_masks = (pred_probs > 0.5).cpu().numpy().squeeze()
+    pred_masks_small = (pred_probs > 0.5).cpu().numpy().squeeze()
+
     output_image = input_image.copy()
     detected_defects = []
-    for i, mask in enumerate(pred_masks):
-        if mask.sum() > 0:
+
+    for i, mask_small in enumerate(pred_masks_small):
+        if mask_small.sum() > 0:
             class_id = i + 1
             detected_defects.append(CLASS_NAMES[class_id])
+            
+            # *** THE FIX IS HERE ***
+            # We must resize the small (256x800) mask back to the original image's dimensions
+            resized_mask = cv2.resize(
+                mask_small.astype(np.uint8),
+                (original_w, original_h), # Target size (width, height)
+                interpolation=cv2.INTER_NEAREST # Use nearest neighbor to keep mask binary
+            )
+            
             color = COLORS[i]
             colored_mask = np.zeros_like(output_image)
-            colored_mask[mask > 0] = color
+            # Use the RESIZED mask for indexing
+            colored_mask[resized_mask > 0] = color
             output_image = cv2.addWeighted(output_image, 1, colored_mask, 0.5, 0)
+
     if detected_defects:
         label_text = "Defects Detected: " + ", ".join(detected_defects)
     else:
         label_text = "No Defects Detected"
+        
     cv2.putText(output_image, label_text, (10, 30), 
                 cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
+
     return output_image
 
 # --- 3. GRADIO INTERFACE ---
@@ -80,5 +102,6 @@ iface = gr.Interface(
     title=title,
     description=description,
 )
+
 if __name__ == "__main__":
     iface.launch()
