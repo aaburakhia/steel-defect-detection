@@ -1,120 +1,116 @@
-# =============================================================================
-# app.py - Automated Steel Defect Detection
-#
-# This application uses a U-Net deep learning model to identify and segment
-# manufacturing defects on steel sheets. The UI is built with Gradio Blocks
-# to provide a professional, report-oriented user experience.
-# =============================================================================
-
 import gradio as gr
-from PIL import Image
+import torch
+import cv2
 import numpy as np
+import segmentation_models_pytorch as smp
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+import os
 
-# --- Placeholder for your actual model and prediction logic ---
-# In a real scenario, you would load your trained model here.
-# For this example, we will simulate a model's output.
+# --- 1. SETUP: Constants and Model Loading ---
+IMG_HEIGHT = 256
+IMG_WIDTH = 800
+DEVICE = "cpu"
 
+CLASS_NAMES = {
+    1: "Pitting / Dots",
+    2: "Fine Vertical Lines",
+    3: "Scratches / Abrasions",
+    4: "Surface Patches"
+}
+COLORS = [(220, 20, 60), (60, 179, 113), (0, 0, 255), (255, 215, 0)]
+
+print("Defining model architecture...")
+model = smp.Unet(
+    encoder_name="efficientnet-b4",
+    encoder_weights=None,
+    in_channels=3,
+    classes=4,
+).to(DEVICE)
+
+MODEL_PATH = "best_model_advanced.pth"
+print(f"Loading model from {MODEL_PATH}...")
+model.load_state_dict(torch.load(MODEL_PATH, map_location=torch.device(DEVICE)))
+model.eval()
+print("Model loaded successfully.")
+
+val_transforms = A.Compose([
+    A.Resize(IMG_HEIGHT, IMG_WIDTH),
+    A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+    ToTensorV2(),
+])
+
+# --- 2. THE CORE PREDICTION FUNCTION (REVISED) ---
+# This function now returns TWO outputs: the image and a dictionary for the label component.
 def predict_defects(input_image):
-    """
-    This function simulates the output of a segmentation model.
-    
-    Args:
-        input_image (PIL.Image): The image uploaded by the user.
-    
-    Returns:
-        tuple: A tuple containing:
-            - A list of (mask, label) tuples for the AnnotatedImage.
-            - A string in Markdown format for the analysis report.
-    """
-    # --- THIS IS WHERE YOUR MODEL'S LOGIC WOULD GO ---
-    # 1. Preprocess the input_image.
-    # 2. Pass it to your U-Net model.
-    # 3. Post-process the model's output masks.
-    # 4. Identify the types of defects found.
-    # For now, we simulate finding two defects.
-    
-    # Simulate a "Scratch" mask (a simple rectangle)
-    width, height = input_image.size
-    scratch_mask = np.zeros((height, width, 4), dtype=np.uint8)
-    scratch_mask[int(height*0.4):int(height*0.6), int(width*0.1):int(width*0.7), :] = [255, 0, 0, 180] # Red mask
+    original_h, original_w, _ = input_image.shape
 
-    # Simulate an "Abrasion" mask (another rectangle)
-    abrasion_mask = np.zeros((height, width, 4), dtype=np.uint8)
-    abrasion_mask[int(height*0.2):int(height*0.8), int(width*0.8):int(width*0.9), :] = [0, 0, 255, 180] # Blue mask
+    transformed = val_transforms(image=input_image)
+    image_tensor = transformed['image'].unsqueeze(0).to(DEVICE)
 
-    # --- Create the outputs for the UI ---
-    
-    # 1. Annotated Image Output
-    # The format is a list of tuples, where each is (mask_numpy_array, label_string)
-    annotated_image_data = [
-        (scratch_mask, "Scratch"),
-        (abrasion_mask, "Abrasion"),
-    ]
-    
-    # 2. Analysis Report Output
-    # This is a dynamically generated Markdown string.
-    defects_found = ["Scratch", "Abrasion"]
-    report_text = f"""
-    ### **Defect Analysis Report**
-    ---
-    **Status:** Defects Detected
+    with torch.no_grad():
+        pred_logits = model(image_tensor)
 
-    **Summary:** A total of **{len(defects_found)}** defects were identified on the provided steel sheet.
+    pred_probs = torch.sigmoid(pred_logits)
+    pred_masks_small = (pred_probs > 0.5).cpu().numpy().squeeze()
 
-    **Detected Defect Types:**
-    """
-    for defect in defects_found:
-        report_text += f"\n- **{defect}**"
-        
-    return annotated_image_data, report_text
+    output_image = input_image.copy()
+    # This will be the dictionary for the gr.Label component
+    defect_summary = {}
 
-# =============================================================================
-# Gradio UI Definition using gr.Blocks
-# =============================================================================
+    for i, mask_small in enumerate(pred_masks_small):
+        if mask_small.sum() > 0:
+            class_id = i + 1
+            # Add the detected defect to our summary dictionary
+            defect_summary[CLASS_NAMES[class_id]] = 1.0
+            
+            resized_mask = cv2.resize(mask_small.astype(np.uint8), (original_w, original_h), interpolation=cv2.INTER_NEAREST)
+            
+            color = COLORS[i]
+            colored_mask = np.zeros_like(output_image)
+            colored_mask[resized_mask > 0] = color
+            output_image = cv2.addWeighted(output_image, 1, colored_mask, 0.5, 0)
 
-with gr.Blocks(theme='soft', title="Automated Steel Defect Detection") as demo:
-    
-    # --- Header Section ---
+    # If no defects were found, the dictionary will be empty, which is what gr.Label expects.
+    return output_image, defect_summary
+
+# --- 3. GRADIO INTERFACE (PROFESSIONAL LAYOUT) ---
+# We use gr.Blocks() for full control over the layout.
+with gr.Blocks(theme='soft', css=".footer {display: none !important}") as demo:
     gr.Markdown(
         """
-        # 🧪 Automated Steel Defect Detection
+        # Automated Steel Defect Detection
+        ### Developed by a Senior Materials & Project Engineer
         This application uses a U-Net deep learning model to identify and segment manufacturing defects on steel sheets. 
-        This project was developed by a Senior Materials & Project Engineer to bridge deep domain expertise with advanced AI skills.
+        Upload an image or use one of the examples below to see the model in action.
         """
     )
     
-    # --- Input Section ---
     with gr.Row():
-        input_image = gr.Image(type="pil", label="Upload Steel Sheet Image")
-    
-    submit_btn = gr.Button("Submit for Analysis", variant="primary")
-    
-    # --- Output Section ---
-    gr.Markdown("--- \n ## 🔎 Analysis Results")
-    with gr.Row():
-        # Using gr.AnnotatedImage for a more professional and interactive output
-        output_image = gr.AnnotatedImage(label="Defect Analysis")
-        # Using gr.Markdown for a clean, formatted report
-        report_text = gr.Markdown(label="Analysis Report")
+        with gr.Column():
+            image_input = gr.Image(type="numpy", label="Upload Steel Sheet Image")
+            submit_button = gr.Button("Submit", variant="primary")
+        with gr.Column():
+            image_output = gr.Image(label="Defect Analysis")
+            label_output = gr.Label(label="Detected Defect Types")
 
-    # --- Logic to connect UI components ---
-    submit_btn.click(
-        fn=predict_defects,
-        inputs=input_image,
-        outputs=[output_image, report_text]
-    )
-    
-    # --- Example Images ---
     gr.Examples(
         examples=[
-            ["./steel_scratch_example.jpg"], # You will need to upload these images to your Space
-            ["./steel_rust_example.jpg"],
+            os.path.join("examples", "0b970984e.jpg"),
+            os.path.join("examples", "00e0398ad.jpg"),
+            os.path.join("examples", "01661826d.jpg")
         ],
-        inputs=input_image,
-        outputs=[output_image, report_text],
+        inputs=image_input,
+        outputs=[image_output, label_output],
         fn=predict_defects,
-        cache_examples=True
+        cache_examples=True # Speeds up demo for users
     )
 
-# Launch the application
-demo.launch()
+    submit_button.click(
+        fn=predict_defects,
+        inputs=image_input,
+        outputs=[image_output, label_output]
+    )
+
+if __name__ == "__main__":
+    demo.launch()
